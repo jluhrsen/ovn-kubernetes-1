@@ -1,7 +1,7 @@
 package main
 
 import (
-	"k8s.io/apimachinery/pkg/util/sets"
+	"github.com/openshift-eng/openshift-tests-extension/pkg/util/sets"
 )
 
 // generatePrependedLabelsStr generates labels that are prepended to a test name. Always add networking label. Add all
