@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/openshift-eng/openshift-tests-extension/pkg/util/sets"
 	"github.com/ovn-org/ovn-kubernetes/openshift-hack/e2e/pkg/generated"
 	// import ovn-kubernetes tests
 	_ "github.com/ovn-org/ovn-kubernetes/test/e2e"
@@ -62,6 +63,13 @@ func main() {
 	})
 
 	specs.Walk(func(spec *extensiontests.ExtensionTestSpec) {
+		// Transform all Feature: labels to OCPFeature:
+		transformedLabels := sets.New[string]()
+		for label := range spec.Labels {
+			transformedLabels.Insert(strings.Replace(label, "Feature:", "OCPFeature:", 1))
+		}
+		spec.Labels = transformedLabels
+
 		if annotations, ok := generated.AppendedAnnotations[spec.Name]; ok {
 			spec.Name += " " + annotations
 		}
