@@ -1,12 +1,14 @@
 package ovn
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
@@ -544,13 +546,94 @@ func (oc *DefaultNetworkController) debugVerifyUDNIsolationState() {
 	} else if len(udnRoutes) == 0 {
 		klog.Warningf("[UDN-DEBUG] PERIODIC-CHECK: NO UDN-enabled service routes found in NBDB — KAPI access may be broken for UDN pods")
 	} else {
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: ======== FOUND %d UDN SERVICE ROUTES IN NBDB ========", len(udnRoutes))
+
+		// Log each route in detail
+		kapiRouteFound := false
+		var kapiRoutePrefix string
 		for i, route := range udnRoutes {
 			klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: UDN-ROUTE[%d] uuid=%s prefix=%s nexthop=%s network=%s topology=%s service=%s",
 				i, route.UUID, route.IPPrefix, route.Nexthop,
 				route.ExternalIDs[types.NetworkExternalID],
 				route.ExternalIDs[types.TopologyExternalID],
 				route.ExternalIDs[types.UDNEnabledServiceExternalID])
+
+			// Check if this is a kubernetes.default (kapi) route
+			if strings.Contains(route.ExternalIDs[types.UDNEnabledServiceExternalID], "default/kubernetes") {
+				kapiRouteFound = true
+				kapiRoutePrefix = route.IPPrefix
+			}
 		}
+
+		// CRITICAL DEBUGGING: When kapi route exists, check if service has endpoints
+		if kapiRouteFound {
+			klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: ======== KAPI ROUTE EXISTS (prefix=%s) - CHECKING SERVICE HEALTH ========", kapiRoutePrefix)
+
+			// Check kubernetes.default service endpoints using kubernetes API
+			endpoints, endpointsErr := oc.client.CoreV1().Endpoints("default").Get(context.TODO(), "kubernetes", metav1.GetOptions{})
+			if endpointsErr != nil {
+				klog.Errorf("[UDN-DEBUG] PERIODIC-CHECK: CRITICAL - Failed to get kubernetes.default endpoints: %v", endpointsErr)
+				klog.Errorf("[UDN-DEBUG] PERIODIC-CHECK: ROOT CAUSE: Cannot verify kapi service has healthy backends - API query failed")
+			} else if len(endpoints.Subsets) == 0 {
+				klog.Errorf("[UDN-DEBUG] PERIODIC-CHECK: CRITICAL - kubernetes.default service has NO endpoint subsets!")
+				klog.Errorf("[UDN-DEBUG] PERIODIC-CHECK: ROOT CAUSE: KAPI service has no backends - this will cause connection timeouts")
+			} else {
+				readyCount := 0
+				notReadyCount := 0
+				for _, subset := range endpoints.Subsets {
+					readyCount += len(subset.Addresses)
+					notReadyCount += len(subset.NotReadyAddresses)
+				}
+				klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: kubernetes.default endpoints: ready=%d notReady=%d subsets=%d",
+					readyCount, notReadyCount, len(endpoints.Subsets))
+
+				if readyCount == 0 {
+					klog.Errorf("[UDN-DEBUG] PERIODIC-CHECK: CRITICAL - kubernetes.default has %d endpoints but ZERO are ready!", notReadyCount)
+					klog.Errorf("[UDN-DEBUG] PERIODIC-CHECK: ROOT CAUSE: KAPI service has no ready backends - connection will timeout")
+				} else {
+					// Endpoints exist and are ready - log first few for reference
+					for i, subset := range endpoints.Subsets {
+						for j, addr := range subset.Addresses {
+							if i == 0 && j < 3 { // Log first 3 addresses from first subset
+								targetRef := "nil"
+								if addr.TargetRef != nil {
+									targetRef = fmt.Sprintf("%s/%s", addr.TargetRef.Namespace, addr.TargetRef.Name)
+								}
+								klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: kubernetes.default ready endpoint[%d]: ip=%s targetRef=%s",
+									j, addr.IP, targetRef)
+							}
+						}
+					}
+				}
+			}
+
+			// Check DNS service route (needed for kubernetes.default hostname resolution)
+			dnsRouteFound := false
+			for _, route := range udnRoutes {
+				if strings.Contains(route.ExternalIDs[types.UDNEnabledServiceExternalID], "openshift-dns/dns-default") {
+					dnsRouteFound = true
+					klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: DNS route exists: prefix=%s nexthop=%s", route.IPPrefix, route.Nexthop)
+					break
+				}
+			}
+			if !dnsRouteFound {
+				klog.Warningf("[UDN-DEBUG] PERIODIC-CHECK: WARNING - No DNS service route found - hostname resolution may fail")
+				klog.Warningf("[UDN-DEBUG] PERIODIC-CHECK: POSSIBLE ROOT CAUSE: UDN pods cannot resolve 'kubernetes.default' to IP")
+			}
+
+			klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: ======== END KAPI ROUTE DIAGNOSTICS ========")
+		}
+
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: ======== TROUBLESHOOTING CHECKLIST (if connectivity fails) ========")
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: 1. Routes in NBDB: VERIFIED ABOVE (%d routes found)", len(udnRoutes))
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: 2. Service endpoints: %s", func() string {
+			if kapiRouteFound { return "CHECKED ABOVE" } else { return "N/A (no kapi route)" }
+		}())
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: 3. Routes in SBDB: Check with 'ovn-sbctl --no-leader-only find Logical_Flow match~kubernetes'")
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: 4. OVS flows: Check with 'ovs-ofctl dump-flows br-int | grep kubernetes'")
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: 5. DNS resolution: Check with 'kubectl exec <pod> -- nslookup kubernetes.default'")
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: 6. Direct IP test: Check with 'kubectl exec <pod> -- curl -k https://<kapi-ip>/healthz'")
+		klog.Infof("[UDN-DEBUG] PERIODIC-CHECK: ======== END TROUBLESHOOTING CHECKLIST ========")
 	}
 }
 
