@@ -1476,6 +1476,13 @@ spec:
 		// different streams and replace what it thinks to be a conflicting port
 		// with a different one, breaking the stream for the involved peers.
 		ginkgo.It("should handle IP fragments", func() {
+			// Skip if external container infrastructure is not available
+			// This test requires bare-metal cluster infrastructure with external containers
+			_, err := infraprovider.Get().PrimaryNetwork()
+			if err != nil {
+				e2eskipper.Skipf("Skipping test - requires external container infrastructure: %v", err)
+			}
+
 			ginkgo.By("Selecting a schedulable node")
 			nodes, err = e2enode.GetBoundedReadySchedulableNodes(context.TODO(), f.ClientSet, 1)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
