@@ -978,6 +978,13 @@ var _ = ginkgo.Describe("Services", feature.Service, func() {
 		})
 
 		ginkgo.It("should listen on each host addresses", func() {
+			// Skip if external container infrastructure is not available
+			// This test requires bare-metal cluster infrastructure with external containers
+			_, err := infraprovider.Get().PrimaryNetwork()
+			if err != nil {
+				e2eskipper.Skipf("Skipping test - requires external container infrastructure: %v", err)
+			}
+
 			endPoints := make([]*v1.Pod, 0)
 			endpointsSelector := map[string]string{"servicebackend": "true"}
 			nodesHostnames := sets.NewString()
