@@ -428,8 +428,31 @@ func getPod(f *framework.Framework, podName string) *v1.Pod {
 }
 
 // Create a pod on the specified node using the agnostic host image
+// sanitizeDNSName converts a string to a valid DNS-1123 subdomain name
+// by replacing dots and other invalid characters with hyphens.
+// This is needed because cloud platform node names often contain dots
+// (e.g., "ip-10-0-11-240.us-west-1.compute.internal") but Kubernetes
+// resource names (pods, containers) must be valid DNS-1123 subdomains.
+func sanitizeDNSName(name string) string {
+	// Replace dots with hyphens (most common issue on cloud platforms)
+	name = strings.ReplaceAll(name, ".", "-")
+	// Replace any other invalid characters with hyphens
+	// DNS-1123 subdomain allows: lowercase alphanumeric, '-', and '.'
+	// Since we already converted dots, we just need to handle other chars
+	name = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return '-'
+	}, strings.ToLower(name))
+	return name
+}
+
 func createPod(f *framework.Framework, podName, nodeSelector, namespace string, command []string, labels map[string]string, options ...func(*v1.Pod)) (*v1.Pod, error) {
 
+	// Sanitize pod name to ensure it's a valid DNS-1123 subdomain
+	// Kubernetes container names cannot contain dots, but node names on cloud platforms often do
+	podName = sanitizeDNSName(podName)
 	contName := fmt.Sprintf("%s-container", podName)
 
 	pod := &v1.Pod{
